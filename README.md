@@ -95,6 +95,8 @@ The zip contains the partial tree at the moment of interruption, for example `at
 - **Permissions**: `ls -l` shows `-rwxr-xr-x` for `attendance_checker.py` and `-rw-------` for `config.json`.
 - **Structure and startup**: the verification run found `Helpers/assets.csv`, `Helpers/config.json` and created `reports/`.
 - **Archive**: with only `attendance.log` present, it archived one log and skipped `absent.log` gracefully.
+- **Real application run**: deployed with the provided templates (Option A, all 10 students) and marked a full session. Roster counts updated, `reports/attendance.log` and `reports/absent.log` were created, and archiving produced timestamped copies of both.
+- **End of input**: if input stops mid-deploy, the script cleans up like an interrupt instead of hanging.
 - **Signals**: sent SIGINT and SIGTSTP mid-deploy; both produced the zip, removed the directory and exited with 130.
 
 ## Video

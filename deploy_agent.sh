@@ -31,12 +31,23 @@ ok()    { echo "[OK]    $*"; }
 warn()  { echo "[WARN]  $*" >&2; }
 err()   { echo "[ERROR] $*" >&2; }
 
+# read wrapper: stop cleanly if input ends (EOF) instead of looping forever
+ask_read() {
+    read "$@" && return 0
+    echo
+    if [ "$DEPLOYING" -eq 1 ]; then
+        handle_interrupt "end of input"
+    fi
+    err "Input ended unexpectedly."
+    exit 1
+}
+
 is_positive_int() { [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ]; }
 
 # Ask for a project name and set PROJECT_DIR. Rejects unsafe names.
 ask_project_name() {
     local input
-    read -r -p "Enter project name (directory will be attendance_tracker_<name>): " input
+    ask_read -r -p "Enter project name (directory will be attendance_tracker_<name>): " input
     if [[ -z "$input" || ! "$input" =~ ^[A-Za-z0-9_.-]+$ || "$input" == "." || "$input" == ".." ]]; then
         err "Invalid name. Use letters, digits, '.', '_' or '-' only (no spaces or slashes)."
         return 1
@@ -195,13 +206,13 @@ generate_roster() {
 
 update_thresholds() {
     local cfg="$1" warning failure
-    read -r -p "Update attendance alert thresholds in config.json? (y/N): " ans
+    ask_read -r -p "Update attendance alert thresholds in config.json? (y/N): " ans
     [[ "$ans" =~ ^[Yy]$ ]] || { info "Keeping default thresholds."; return 0; }
 
     while true; do
-        read -r -p "  Warning threshold % [75]: " warning
+        ask_read -r -p "  Warning threshold % [75]: " warning
         warning="${warning:-75}"
-        read -r -p "  Failure threshold % [50]: " failure
+        ask_read -r -p "  Failure threshold % [50]: " failure
         failure="${failure:-50}"
         if [[ "$warning" =~ ^[0-9]+$ && "$failure" =~ ^[0-9]+$ ]] \
            && [ "$warning" -le 100 ] && [ "$failure" -le 100 ] \
@@ -226,7 +237,7 @@ deploy() {
     # Overwrite protection (runs before any traps matter: nothing created yet)
     if [[ -e "$SCRIPT_DIR/$PROJECT_DIR" ]]; then
         warn "Directory '$PROJECT_DIR' already exists."
-        read -r -p "Overwrite it? (y/N): " ans
+        ask_read -r -p "Overwrite it? (y/N): " ans
         if [[ "$ans" =~ ^[Yy]$ ]]; then
             rm -rf "${SCRIPT_DIR:?}/$PROJECT_DIR"
         else
@@ -252,15 +263,15 @@ deploy() {
     echo "  A) Copy rows from templates/assets.csv (4 prior sessions each)"
     echo "  B) Generate a fresh roster (counts start at 0)"
     while true; do
-        read -r -p "Choose A or B: " choice
+        ask_read -r -p "Choose A or B: " choice
         [[ "$choice" =~ ^[AaBb]$ ]] && break
         warn "Please enter A or B."
     done
 
     if [[ "$choice" =~ ^[Aa]$ ]]; then
-        avail=$(( $(wc -l < "$TEMPLATES_DIR/assets.csv") - 1 ))
+        avail=$(awk 'END{print NR-1}' "$TEMPLATES_DIR/assets.csv")
         while true; do
-            read -r -p "How many students to copy (1-${avail})? " count
+            ask_read -r -p "How many students to copy (1-${avail})? " count
             if is_positive_int "$count" && [ "$count" -le "$avail" ]; then break; fi
             warn "Enter a whole number between 1 and ${avail}."
         done
@@ -268,7 +279,7 @@ deploy() {
         total_sessions=5
     else
         while true; do
-            read -r -p "How many students to generate (1-100)? " count
+            ask_read -r -p "How many students to generate (1-100)? " count
             if is_positive_int "$count" && [ "$count" -le 100 ]; then break; fi
             warn "Enter a whole number between 1 and 100."
         done
@@ -324,7 +335,7 @@ menu() {
         echo "2) Run the application"
         echo "3) Archive the log files"
         echo "4) Exit"
-        read -r -p "Select an option [1-4]: " opt
+        ask_read -r -p "Select an option [1-4]: " opt
         case "$opt" in
             1) deploy ;;
             2) run_app "" ;;
