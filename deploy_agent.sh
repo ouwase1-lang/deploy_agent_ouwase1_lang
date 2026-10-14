@@ -16,10 +16,11 @@
 #   ./deploy_agent.sh --help      (or -h)
 # =============================================================================
 
+# Absolute path of the folder holding this script, so it works from any directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATES_DIR="$SCRIPT_DIR/templates"
 
-# Globals used by the signal handler
+# Globals shared with the signal handler (it needs to know what to clean up)
 PROJECT_DIR=""        # e.g. attendance_tracker_demo (relative to SCRIPT_DIR)
 DEPLOYING=0           # 1 while Feature 1 is in progress
 
@@ -44,7 +45,9 @@ ask_read() {
 
 is_positive_int() { [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ]; }
 
-# Ask for a project name and set PROJECT_DIR. Rejects unsafe names.
+# Ask for a project name and set PROJECT_DIR.
+# Only letters, digits, ".", "_" and "-" are allowed, which blocks spaces,
+# slashes and "..", so a typo can never create or delete the wrong path.
 ask_project_name() {
     local input
     ask_read -r -p "Enter project name (directory will be attendance_tracker_<name>): " input
@@ -59,6 +62,9 @@ ask_project_name() {
 # ----------------------------------------------------------------------------
 # Signal handling (Ctrl+C = SIGINT, Ctrl+Z = SIGTSTP) - active during deploy
 # ----------------------------------------------------------------------------
+# Runs when SIGINT/SIGTSTP (or end of input) arrives during deployment:
+# 1) report it, 2) zip whatever exists so far, 3) delete the half-made
+# directory, 4) exit cleanly.
 handle_interrupt() {
     local sig="$1"
     # Ignore further signals while we clean up
@@ -88,6 +94,8 @@ handle_interrupt() {
     exit 130
 }
 
+# Traps are switched on only while deploying, and off before the app runs,
+# so they never interfere with the marking session in attendance_checker.py.
 enable_traps()  {
     trap 'handle_interrupt SIGINT'  INT
     trap 'handle_interrupt SIGTSTP' TSTP
@@ -97,6 +105,9 @@ disable_traps() { trap - INT TSTP; }
 # ----------------------------------------------------------------------------
 # Feature 2: Run the application
 # ----------------------------------------------------------------------------
+# Run the app from inside the project folder, because attendance_checker.py
+# reads its files via fixed relative paths (Helpers/..., reports/...).
+# Takes a project dir, or asks for one if called with an empty argument.
 run_app() {
     local dir="$1"
     if [[ -z "$dir" ]]; then
@@ -108,6 +119,7 @@ run_app() {
         return 1
     fi
     info "Starting the Attendance Tracker in $dir ..."
+    # Subshell: the cd does not change this script's own working directory
     ( cd "$SCRIPT_DIR/$dir" && python3 attendance_checker.py )
     local rc=$?
     if [ $rc -eq 0 ]; then
@@ -129,6 +141,7 @@ archive_logs() {
         return 1
     fi
 
+    # One timestamp for the whole run so both logs share the same suffix
     local ts archived=0 missing=0 name src dest_dir dest
     ts="$(date +%Y%m%d_%H%M%S)"
 
@@ -136,6 +149,7 @@ archive_logs() {
         src="$dir/reports/${name}.log"
         dest_dir="$dir/archives/${name}"
         dest="$dest_dir/${name}_${ts}.log"
+        # A missing log (e.g. nobody was absent) is reported, not treated as a crash
         if [[ -f "$src" ]]; then
             mkdir -p "$dest_dir" || { err "Cannot create $dest_dir"; continue; }
             if cp "$src" "$dest"; then
@@ -160,6 +174,7 @@ archive_logs() {
 # ----------------------------------------------------------------------------
 # Feature 1: Deploy
 # ----------------------------------------------------------------------------
+# Fail early with a clear message if a required tool or template is missing
 preflight_checks() {
     local missing=0 cmd
     for cmd in python3 zip; do
@@ -189,6 +204,8 @@ EMAILS=("alice" "bob" "carol" "david" "eve"
         "frank" "grace" "henry" "irene" "jack"
         "karen" "leo" "mia" "noah" "olivia")
 
+# Option B: build a roster of $1 students into file $2, counts starting at 0.
+# Past 15 students the sample names repeat with a number so emails stay unique.
 generate_roster() {
     local count="$1" out="$2" i idx round
     echo "Email,Names,Attendance Count,Absence Count" > "$out"
@@ -204,6 +221,8 @@ generate_roster() {
     done
 }
 
+# Optionally change the warning/failure percentages in the deployed config.json.
+# Only those two values are touched (via sed), so the file layout is unchanged.
 update_thresholds() {
     local cfg="$1" warning failure
     ask_read -r -p "Update attendance alert thresholds in config.json? (y/N): " ans
@@ -230,6 +249,7 @@ update_thresholds() {
     ok "Thresholds updated: warning=${warning}, failure=${failure}"
 }
 
+# Feature 1: build a new project end to end, then verify it by running the app
 deploy() {
     preflight_checks || return 1
     ask_project_name || return 1
@@ -257,7 +277,7 @@ deploy() {
     cp "$TEMPLATES_DIR/attendance_checker.py" "$PROJECT_DIR/attendance_checker.py" || return 1
     cp "$TEMPLATES_DIR/config.json" "$PROJECT_DIR/Helpers/config.json" || return 1
 
-    # --- Roster ---
+    # --- Roster: A = copy rows from the template, B = generate fresh rows ---
     local choice count total_sessions avail
     echo "How should the student roster be built?"
     echo "  A) Copy rows from templates/assets.csv (4 prior sessions each)"
@@ -275,6 +295,7 @@ deploy() {
             if is_positive_int "$count" && [ "$count" -le "$avail" ]; then break; fi
             warn "Enter a whole number between 1 and ${avail}."
         done
+        # +1 keeps the header row
         head -n $((count + 1)) "$TEMPLATES_DIR/assets.csv" > "$PROJECT_DIR/Helpers/assets.csv"
         total_sessions=5
     else
@@ -288,6 +309,7 @@ deploy() {
     fi
     ok "Roster created with $count students."
 
+    # Rule: total_sessions = prior sessions in the roster + 1 (today).
     # Keep total_sessions consistent with the roster (prior sessions + 1)
     sed -i.bak -E "s/(\"total_sessions\"[[:space:]]*:[[:space:]]*)[0-9]+/\1${total_sessions}/" \
         "$PROJECT_DIR/Helpers/config.json" && rm -f "$PROJECT_DIR/Helpers/config.json.bak"
@@ -296,7 +318,7 @@ deploy() {
     # --- Thresholds ---
     update_thresholds "$PROJECT_DIR/Helpers/config.json"
 
-    # --- Permissions ---
+    # --- Permissions: script executable, config readable/writable by owner only ---
     chmod +x "$PROJECT_DIR/attendance_checker.py"
     chmod 600 "$PROJECT_DIR/Helpers/config.json"
     echo "Permissions set:"
@@ -327,6 +349,7 @@ With no option, an interactive menu is shown.
 EOF
 }
 
+# Interactive menu (used when the script is run with no arguments)
 menu() {
     while true; do
         echo
